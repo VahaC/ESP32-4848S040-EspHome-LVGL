@@ -1,0 +1,530 @@
+esphome:
+  name: esphome-esp32-s3-4848s040
+  friendly_name: Esphome-ESP32-S3-4848S040
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  baud_rate: 0
+  level: INFO
+
+# Enable web server
+web_server:
+  version: 3
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "7KZ0v/YsESK1KxZffUyZawrYTG/7rB5q8bNKJHSKJmM="
+
+ota:
+  - platform: esphome
+    password: "5a0418442eb57f47e0b5360ed4b49cc1"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case Wi-Fi connection fails
+  ap:
+    ssid: "Esphome-Esp32-S3-4848S040"
+    password: "AWwK5mCFhfZC"
+
+captive_portal:
+
+debug:
+  update_interval: 5s
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+
+# -------------------- OUTPUTS --------------------
+# Backlight PWM
+output:
+  - platform: ledc
+    pin: GPIO38
+    id: backlight_pwm
+    frequency: 1000 Hz    # Lower PWM frequency for more stable backlight behavior
+
+  # Dummy outputs for RGB "Text Color" light (not physically connected)
+  - platform: template
+    id: text_color_r
+    type: float
+    write_action:
+      - lambda: |-
+          // This output is virtual; no hardware action required.
+
+  - platform: template
+    id: text_color_g
+    type: float
+    write_action:
+      - lambda: |-
+          // This output is virtual; no hardware action required.
+
+  - platform: template
+    id: text_color_b
+    type: float
+    write_action:
+      - lambda: |-
+          // This output is virtual; no hardware action required.
+
+# -------------------- LIGHTS --------------------
+light:
+  # Backlight (internal), dimmable, state restored between reboots
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Display Backlight"
+    id: back_light
+    internal: true
+    default_transition_length: 1s
+    restore_mode: RESTORE_DEFAULT_ON  # Restore last state; default ON if no saved state
+    gamma_correct: 1.0                # Disable extra gamma correction; panel has its own curve
+
+  # Virtual RGB light to control text color from Home Assistant
+  - platform: rgb
+    name: "Text Color"
+    id: text_color_light
+    red: text_color_r
+    green: text_color_g
+    blue: text_color_b
+    restore_mode: RESTORE_DEFAULT_ON  # Restore last color/on state
+
+    on_state:
+      # 1) Synchronize backlight brightness/state with "Text Color"
+      - lambda: |-
+          // Sync backlight brightness and on/off with "Text Color" light
+          auto &vals = id(text_color_light).remote_values;
+
+          if (vals.is_on()) {
+            // Turn on backlight with the same brightness
+            auto call = id(back_light).turn_on();
+            call.set_brightness(vals.get_brightness());  // 0.0 .. 1.0
+            call.perform();
+          } else {
+            // Turn off backlight when "Text Color" is off
+            auto call = id(back_light).turn_off();
+            call.perform();
+          }
+
+      # 2) Change color of all LVGL text labels based on "Text Color"
+      - lvgl.label.update:
+          id:
+            - temperature_value
+            - temperature_unit
+            - humidity_value
+            - humidity_unit
+            - pressure_value
+            - pressure_unit
+            - battery_value
+          text_color: !lambda |-
+            // Map "Text Color" light RGB to LVGL color
+            auto &vals = id(text_color_light).remote_values;
+            uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
+            uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
+            uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
+            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            return lv_color_hex(rgb);
+
+      # 3) Change bar indicator color in LVGL based on "Text Color"
+      - lvgl.bar.update:
+          id: battery_bar
+          border_color: !lambda |-
+            // Map "Text Color" light RGB to LVGL color for battery bar
+            auto &vals = id(text_color_light).remote_values;
+            uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
+            uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
+            uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
+            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            return lv_color_hex(rgb);
+          indicator:
+            bg_color: !lambda |-
+              // Map "Text Color" light RGB to LVGL color for battery bar
+              auto &vals = id(text_color_light).remote_values;
+              uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
+              uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
+              uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
+              uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+              return lv_color_hex(rgb);
+
+# -------------------- SPI / I2C / PSRAM --------------------
+spi:
+  clk_pin: GPIO48
+  mosi_pin: GPIO47
+  interface: hardware
+  id: spihwd
+
+i2c:
+  id: touchscreen_bus
+  sda: GPIO19
+  scl:
+    number: 45
+    ignore_strapping_warning: true
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# -------------------- FONTS --------------------
+font:
+  - file: "gfonts://Montserrat"
+    id: montserrat_120
+    size: 120
+    bpp: 4
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_96
+    size: 96
+    bpp: 4
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_45
+    size: 45
+    bpp: 4
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_27
+    size: 27
+    bpp: 4
+
+# -------------------- DISPLAY (ST7701S RGB) --------------------
+display:
+  - platform: st7701s
+    id: tft_display
+    spi_id: spihwd
+    dimensions:
+      width: 480
+      height: 480
+    # rotation: 270    # Uncomment for placement with down-facing USB socket
+    spi_mode: MODE3
+    data_rate: 2MHz
+    color_order: RGB
+    invert_colors: false
+    cs_pin: 39
+    de_pin: 18
+    hsync_pin: 16
+    vsync_pin: 17
+    pclk_pin: 21
+    pclk_frequency: 12MHz
+    pclk_inverted: false
+    hsync_pulse_width: 8
+    hsync_front_porch: 10
+    hsync_back_porch: 20
+    vsync_pulse_width: 8
+    vsync_front_porch: 10
+    vsync_back_porch: 10
+    auto_clear_enabled: false
+    update_interval: never
+    init_sequence:
+      - 1
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x10] # CMD2_BKSEL_BK0
+      - [0xCD, 0x00] # Disable MDT flag
+    data_pins:
+      red: [11, 12, 13, 14, 0]
+      green: [8, 20, 3, 46, 9, 10]
+      blue: [4, 5, 6, 7, 15]
+
+# -------------------- TOUCHSCREEN --------------------
+touchscreen:
+  - platform: gt911
+    id: tft_touch
+    display: tft_display
+
+# -------------------- IMAGES --------------------
+image:
+  - file: mdi:home-assistant
+    id: icon_home_assistant
+    resize: 96x96
+    type: rgb565
+    transparency: alpha_channel
+
+  - file: mdi:thermometer
+    id: icon_temperature
+    resize: 64x64
+    type: rgb565
+    transparency: alpha_channel
+
+  - file: mdi:water-percent
+    id: icon_humidity
+    resize: 64x64
+    type: rgb565
+    transparency: alpha_channel
+
+  - file: mdi:gauge
+    id: icon_pressure
+    resize: 64x64
+    type: rgb565
+    transparency: alpha_channel
+
+  - file: mdi:battery-70
+    id: icon_battery
+    resize: 64x64
+    type: rgb565
+    transparency: alpha_channel
+
+# -------------------- SENSORS (FROM HOME ASSISTANT) --------------------
+sensor:
+  # Temperature (from Home Assistant)
+  - platform: homeassistant
+    id: temperature
+    unit_of_measurement: "°C"
+    entity_id: sensor.outdoor_sensor_temperature
+    on_value:
+      - lvgl.label.update:
+          id: temperature_value
+          text:
+            format: "%.0f"
+            args: [ x ]
+            if_nan: "??"
+
+  # Humidity (from Home Assistant)
+  - platform: homeassistant
+    id: humidity
+    unit_of_measurement: "%"
+    entity_id: sensor.outdoor_sensor_humidity
+    on_value:
+      - lvgl.label.update:
+          id: humidity_value
+          text:
+            format: "%.0f"
+            args: [ x ]
+            if_nan: "??"
+
+  # Pressure (from Home Assistant)
+  - platform: homeassistant
+    id: presure
+    unit_of_measurement: "mmHg"
+    entity_id: sensor.outdoor_pressure_mmhg
+    on_value:
+      - lvgl.label.update:
+          id: pressure_value
+          text:
+            format: "%.0f"
+            args: [ x ]
+            if_nan: "???"
+
+  # Battery level (from Home Assistant)
+  - platform: homeassistant
+    id: battery
+    entity_id: sensor.outdoor_sensor_battery
+    unit_of_measurement: "%"
+    on_value:
+      # Update text like "83%"
+      - lvgl.label.update:
+          id: battery_value
+          text:
+            format: "%.0f%%"
+            args: [ x ]
+            if_nan: "??%"
+
+      # Update progress bar (0–100)
+      - lvgl.bar.update:
+          id: battery_bar
+          value: !lambda |-
+            if (isnan(x)) {
+              return 0;
+            }
+            float v = x;
+            if (v < 0.0f) v = 0.0f;
+            if (v > 100.0f) v = 100.0f;
+            return (int) v;
+
+  # Template sensor that exposes current backlight brightness in %
+  - platform: template
+    id: current_brightness_variable
+    name: "Current Brightness"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: "measurement"
+    update_interval: 2s
+    filters:
+      - delta: 1.0   # Publish only if brightness changed by >= 1%
+    lambda: |-
+      // Light brightness is in range 0.0..1.0, convert to percentage
+      return id(back_light).current_values.get_brightness() * 100.0f;
+
+# -------------------- LVGL CONFIGURATION --------------------
+lvgl:
+  log_level: INFO
+  buffer_size: 25%
+  disp_bg_color: 0x000000
+  default_font: montserrat_27
+
+  displays:
+    - tft_display
+
+  touchscreens:
+    - touchscreen_id: tft_touch
+
+  pages:
+    - id: main_page
+      bg_color: 0x000000
+
+      widgets:
+        # ---------- TEMPERATURE (centered group) ----------
+        - obj:
+            id: temperature_group
+            align: TOP_MID      # Center horizontally on screen
+            y: 0                # Vertical offset from top
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              pad_column: 10    # Horizontal gap between children
+            widgets:
+              - image:
+                  id: temperature_icon_widget
+                  src: icon_temperature
+                  image_recolor: 0xFFFFFF
+                  image_recolor_opa: COVER
+
+              - label:
+                  id: temperature_value
+                  text: "??"
+                  text_font: montserrat_120
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: temperature_unit
+                  text: "°C"
+                  text_font: montserrat_96
+                  text_color: 0xFFFFFF
+
+        # ---------- HUMIDITY (centered group) ----------
+        - obj:
+            id: humidity_group
+            align: TOP_MID      # Center horizontally on screen
+            y: 150              # Vertical offset from top
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              pad_column: 10    # Horizontal gap between children
+            widgets:
+              - image:
+                  id: humidity_icon_widget
+                  src: icon_humidity
+                  image_recolor: 0xFFFFFF
+                  image_recolor_opa: COVER
+
+              - label:
+                  id: humidity_value
+                  text: "??"
+                  text_font: montserrat_120
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: humidity_unit
+                  text: "%"
+                  text_font: montserrat_96
+                  text_color: 0xFFFFFF
+
+        # ---------- PRESSURE ----------
+        - obj:
+            id: pressure_group
+            align: TOP_LEFT     # Place near bottom-left
+            y: 320              # Vertical offset from top
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            widgets:
+              - image:
+                  id: pressure_icon_widget
+                  src: icon_pressure
+                  y: -10
+                  image_recolor: 0xFFFFFF
+                  image_recolor_opa: COVER
+
+              - label:
+                  id: pressure_value
+                  text: "???"
+                  align_to:
+                    id: pressure_unit
+                    align: BOTTOM_MID
+                    x: 0
+                    y: -30
+                  text_font: montserrat_45
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: pressure_unit
+                  text: "mmHg"
+                  x: 70
+                  y: 30
+                  text_font: montserrat_27
+                  text_color: 0xFFFFFF
+
+        # ---------- BATTERY ----------
+        - obj:
+            id: battery_group
+            align: TOP_RIGHT    # Place near bottom-right
+            y: 320              # Vertical offset from top
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            widgets:
+              - image:
+                  id: battery_icon_widget
+                  src: icon_battery
+                  y: -10
+                  image_recolor: 0xFFFFFF
+                  image_recolor_opa: COVER
+
+              - label:
+                  id: battery_value
+                  text: "??%"
+                  align_to:
+                    id: battery_bar
+                    align: BOTTOM_MID
+                    x: 0
+                    y: -26
+                  text_font: montserrat_45
+                  text_color: 0xFFFFFF
+
+              - bar:
+                  id: battery_bar
+                  x: 70
+                  y: 40
+                  width: 100
+                  height: 20
+                  min_value: 0
+                  max_value: 100
+                  # Frame around the whole bar
+                  bg_color: 0x000000        # background inside the frame
+                  bg_opa: 0%                # make background transparent if you want only the frame
+                  border_color: 0xFFFFFF    # frame color
+                  border_width: 2           # frame thickness
+                  radius: 0                 # square corners
+                  indicator:
+                    bg_color: 0xFFFFFF
+                    bg_opa: 100%
+                    radius: 0              # keep same shape as outer frame
+                    border_width: 0        # no border on indicator
+
+        # ---------- HOME ASSISTANT ICON ----------
+        - image:
+            id: ha_icon_widget
+            src: icon_home_assistant
+            align: BOTTOM_MID
+            y: -20
+            image_recolor: 0xFFFFFF
+            image_recolor_opa: COVER
