@@ -1,6 +1,21 @@
 esphome:
   name: esphome-esp32-s3-4848s040
   friendly_name: Esphome-ESP32-S3-4848S040
+  on_boot:
+    priority: 600
+    then:
+      - text.set:
+          id: text_color_hex
+          value: !lambda |-
+            int r = id(text_color_r_glob);
+            int g = id(text_color_g_glob);
+            int b = id(text_color_b_glob);
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+            char buf[8];
+            sprintf(buf, "%02X%02X%02X", r, g, b);
+            return std::string(buf);
 
 esp32:
   variant: esp32s3
@@ -46,6 +61,66 @@ text_sensor:
     reset_reason:
       name: "Reset Reason"
 
+text:
+  - platform: template
+    name: "Text Color Hex"
+    id: text_color_hex
+    optimistic: true
+    mode: text
+    max_length: 7
+    on_value:
+      then:
+        - lambda: |-
+            // Parse HEX string like "#F0F0F0" or "F0F0F0" from Home Assistant UI
+            std::string s = x;
+
+            // Trim leading/trailing whitespace
+            while (!s.empty() && (s.front() == ' ' || s.front() == '\n' || s.front() == '\r' || s.front() == '\t')) {
+              s.erase(0, 1);
+            }
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r' || s.back() == '\t')) {
+              s.pop_back();
+            }
+
+            // Optional leading '#'
+            if (!s.empty() && s[0] == '#') {
+              s = s.substr(1);
+            }
+
+            if (s.size() == 6) {
+              unsigned int r, g, b;
+              if (sscanf(s.c_str(), "%02x%02x%02x", &r, &g, &b) == 3) {
+                id(text_color_r_glob) = (int) r;
+                id(text_color_g_glob) = (int) g;
+                id(text_color_b_glob) = (int) b;
+                ESP_LOGI("text_color_hex", "Parsed HEX %s -> R=%u G=%u B=%u", s.c_str(), r, g, b);
+                id(apply_text_color).execute();
+                id(update_color_ui).execute();
+              } else {
+                ESP_LOGW("text_color_hex", "HEX parse failed for '%s'", s.c_str());
+              }
+            } else {
+              ESP_LOGW("text_color_hex", "HEX must be 6 chars, got '%s'", s.c_str());
+            }
+
+# -------------------- GLOBALS (TEXT COLOR) --------------------
+globals:
+  # Global text color components (0..255), fully local on device
+  - id: text_color_r_glob
+    type: int
+    restore_value: true
+    initial_value: '255'
+
+  - id: text_color_g_glob
+    type: int
+    restore_value: true
+    initial_value: '255'
+
+  - id: text_color_b_glob
+    type: int
+    restore_value: true
+    initial_value: '255'
+
 # -------------------- OUTPUTS --------------------
 # Backlight PWM
 output:
@@ -54,28 +129,6 @@ output:
     id: backlight_pwm
     frequency: 1000 Hz    # Lower PWM frequency for more stable backlight behavior
 
-  # Dummy outputs for RGB "Text Color" light (not physically connected)
-  - platform: template
-    id: text_color_r
-    type: float
-    write_action:
-      - lambda: |-
-          // This output is virtual; no hardware action required.
-
-  - platform: template
-    id: text_color_g
-    type: float
-    write_action:
-      - lambda: |-
-          // This output is virtual; no hardware action required.
-
-  - platform: template
-    id: text_color_b
-    type: float
-    write_action:
-      - lambda: |-
-          // This output is virtual; no hardware action required.
-
 # -------------------- LIGHTS --------------------
 light:
   # Backlight (internal), dimmable, state restored between reboots
@@ -83,76 +136,10 @@ light:
     output: backlight_pwm
     name: "Display Backlight"
     id: back_light
-    internal: true
+    internal: false                # Expose to Home Assistant as a normal light
     default_transition_length: 1s
     restore_mode: RESTORE_DEFAULT_ON  # Restore last state; default ON if no saved state
     gamma_correct: 1.0                # Disable extra gamma correction; panel has its own curve
-
-  # Virtual RGB light to control text color from Home Assistant
-  - platform: rgb
-    name: "Text Color"
-    id: text_color_light
-    red: text_color_r
-    green: text_color_g
-    blue: text_color_b
-    restore_mode: RESTORE_DEFAULT_ON  # Restore last color/on state
-
-    on_state:
-      # 1) Synchronize backlight brightness/state with "Text Color"
-      - lambda: |-
-          // Sync backlight brightness and on/off with "Text Color" light
-          auto &vals = id(text_color_light).remote_values;
-
-          if (vals.is_on()) {
-            // Turn on backlight with the same brightness
-            auto call = id(back_light).turn_on();
-            call.set_brightness(vals.get_brightness());  // 0.0 .. 1.0
-            call.perform();
-          } else {
-            // Turn off backlight when "Text Color" is off
-            auto call = id(back_light).turn_off();
-            call.perform();
-          }
-
-      # 2) Change color of all LVGL text labels based on "Text Color"
-      - lvgl.label.update:
-          id:
-            - temperature_value
-            - temperature_unit
-            - humidity_value
-            - humidity_unit
-            - pressure_value
-            - pressure_unit
-            - battery_value
-          text_color: !lambda |-
-            // Map "Text Color" light RGB to LVGL color
-            auto &vals = id(text_color_light).remote_values;
-            uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
-            uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
-            uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
-            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-            return lv_color_hex(rgb);
-
-      # 3) Change bar indicator color in LVGL based on "Text Color"
-      - lvgl.bar.update:
-          id: battery_bar
-          border_color: !lambda |-
-            // Map "Text Color" light RGB to LVGL color for battery bar
-            auto &vals = id(text_color_light).remote_values;
-            uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
-            uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
-            uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
-            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-            return lv_color_hex(rgb);
-          indicator:
-            bg_color: !lambda |-
-              // Map "Text Color" light RGB to LVGL color for battery bar
-              auto &vals = id(text_color_light).remote_values;
-              uint8_t r = (uint8_t)(vals.get_red() * 255.0f);
-              uint8_t g = (uint8_t)(vals.get_green() * 255.0f);
-              uint8_t b = (uint8_t)(vals.get_blue() * 255.0f);
-              uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-              return lv_color_hex(rgb);
 
 # -------------------- SPI / I2C / PSRAM --------------------
 spi:
@@ -349,6 +336,170 @@ sensor:
     lambda: |-
       // Light brightness is in range 0.0..1.0, convert to percentage
       return id(back_light).current_values.get_brightness() * 100.0f;
+    on_value:
+      # Keep brightness slider in sync with real backlight brightness (0..100)
+      - lvgl.slider.update:
+          id: brightness_slider
+          value: !lambda 'return x;'
+      # Keep percentage label in sync
+      - lvgl.label.update:
+          id: brightness_value_label
+          text:
+            format: "%.0f%%"
+            args: [ x ]
+            if_nan: "--%"
+
+# -------------------- SCRIPTS (COLOR HANDLING) --------------------
+script:
+  # аauto return to home page after 30 seconds
+  - id: settings_idle_timer
+    mode: restart
+    then:
+      - delay: 30s
+      - lvgl.page.show:
+          id: main_page
+          animation: MOVE_RIGHT
+          time: 200ms
+
+  # Apply current global text color (R/G/B) to all LVGL widgets
+  - id: apply_text_color
+    then:
+      # Update labels (main page + settings page)
+      - lvgl.label.update:
+          id:
+            # Main page labels
+            - temperature_value
+            - temperature_unit
+            - humidity_value
+            - humidity_unit
+            - pressure_value
+            - pressure_unit
+            - battery_value
+            # Settings page labels
+            - brightness_label
+            - brightness_value_label
+            - color_label
+            - color_r_value_label
+            - color_g_value_label
+            - color_b_value_label
+          text_color: !lambda |-
+            int r = id(text_color_r_glob);
+            int g = id(text_color_g_glob);
+            int b = id(text_color_b_glob);
+
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+
+            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            return lv_color_hex(rgb);
+
+      # Update battery bar frame and indicator
+      - lvgl.bar.update:
+          id: battery_bar
+          border_color: !lambda |-
+            int r = id(text_color_r_glob);
+            int g = id(text_color_g_glob);
+            int b = id(text_color_b_glob);
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            return lv_color_hex(rgb);
+          indicator:
+            bg_color: !lambda |-
+              int r = id(text_color_r_glob);
+              int g = id(text_color_g_glob);
+              int b = id(text_color_b_glob);
+              if (r < 0) r = 0; if (r > 255) r = 255;
+              if (g < 0) g = 0; if (g > 255) g = 255;
+              if (b < 0) b = 0; if (b > 255) b = 255;
+              uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+              return lv_color_hex(rgb);
+
+      # Update brightness slider visuals (indicator + knob)
+      - lvgl.slider.update:
+          id: brightness_slider
+          indicator:
+            bg_color: !lambda |-
+              int r = id(text_color_r_glob);
+              int g = id(text_color_g_glob);
+              int b = id(text_color_b_glob);
+              if (r < 0) r = 0; if (r > 255) r = 255;
+              if (g < 0) g = 0; if (g > 255) g = 255;
+              if (b < 0) b = 0; if (b > 255) b = 255;
+              uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+              return lv_color_hex(rgb);
+          knob:
+            bg_color: !lambda |-
+              int r = id(text_color_r_glob);
+              int g = id(text_color_g_glob);
+              int b = id(text_color_b_glob);
+              if (r < 0) r = 0; if (r > 255) r = 255;
+              if (g < 0) g = 0; if (g > 255) g = 255;
+              if (b < 0) b = 0; if (b > 255) b = 255;
+              uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+              return lv_color_hex(rgb);
+
+  # Update color sliders, numeric labels and preview from globals
+  - id: update_color_ui
+    then:
+      # Update sliders (0..255)
+      - lvgl.slider.update:
+          id: color_r_slider
+          value: !lambda 'return id(text_color_r_glob);'
+      - lvgl.slider.update:
+          id: color_g_slider
+          value: !lambda 'return id(text_color_g_glob);'
+      - lvgl.slider.update:
+          id: color_b_slider
+          value: !lambda 'return id(text_color_b_glob);'
+
+      # Update numeric labels
+      - lvgl.label.update:
+          id: color_r_value_label
+          text: !lambda |-
+            char buf[4];
+            sprintf(buf, "%d", id(text_color_r_glob));
+            return std::string(buf);
+      - lvgl.label.update:
+          id: color_g_value_label
+          text: !lambda |-
+            char buf[4];
+            sprintf(buf, id(text_color_g_glob) < 100 ? "%d" : "%d", id(text_color_g_glob));
+            return std::string(buf);
+      - lvgl.label.update:
+          id: color_b_value_label
+          text: !lambda |-
+            char buf[4];
+            sprintf(buf, "%d", id(text_color_b_glob));
+            return std::string(buf);
+
+      - lvgl.label.update:
+          id: color_hex_label
+          text: !lambda |-
+            int r = id(text_color_r_glob);
+            int g = id(text_color_g_glob);
+            int b = id(text_color_b_glob);
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+            char buf[10];
+            sprintf(buf, "#%02X%02X%02X", r, g, b);
+            return std::string(buf);
+
+      # Update color preview rectangle
+      - lvgl.obj.update:
+          id: color_preview
+          bg_color: !lambda |-
+            int r = id(text_color_r_glob);
+            int g = id(text_color_g_glob);
+            int b = id(text_color_b_glob);
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+            uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            return lv_color_hex(rgb);
 
 # -------------------- LVGL CONFIGURATION --------------------
 lvgl:
@@ -363,7 +514,14 @@ lvgl:
   touchscreens:
     - touchscreen_id: tft_touch
 
+  # Коли LVGL повністю ініціалізований – застосовуємо збережений колір
+  on_ready:
+    then:
+      - script.execute: apply_text_color
+      - script.execute: update_color_ui
+
   pages:
+    # ================= MAIN PAGE (DEFAULT) =================
     - id: main_page
       bg_color: 0x000000
 
@@ -509,18 +667,18 @@ lvgl:
                   min_value: 0
                   max_value: 100
                   # Frame around the whole bar
-                  bg_color: 0x000000        # background inside the frame
-                  bg_opa: 0%                # make background transparent if you want only the frame
-                  border_color: 0xFFFFFF    # frame color
-                  border_width: 2           # frame thickness
-                  radius: 0                 # square corners
+                  bg_color: 0x000000        # Background inside the frame
+                  bg_opa: 0%                # Make background transparent if you want only the frame
+                  border_color: 0xFFFFFF    # Frame color
+                  border_width: 2           # Frame thickness
+                  radius: 0                 # Square corners
                   indicator:
                     bg_color: 0xFFFFFF
                     bg_opa: 100%
-                    radius: 0              # keep same shape as outer frame
-                    border_width: 0        # no border on indicator
+                    radius: 0              # Keep same shape as outer frame
+                    border_width: 0        # No border on indicator
 
-        # ---------- HOME ASSISTANT ICON ----------
+        # ---------- HOME ASSISTANT ICON (switch to settings) ----------
         - image:
             id: ha_icon_widget
             src: icon_home_assistant
@@ -528,3 +686,345 @@ lvgl:
             y: -20
             image_recolor: 0xFFFFFF
             image_recolor_opa: COVER
+            on_click:
+              then:
+                - script.execute: settings_idle_timer      # start/reset timer
+                - lvgl.page.show:
+                    id: settings_page
+                    animation: MOVE_LEFT
+                    time: 200ms
+
+    # ================= SETTINGS PAGE =================
+    - id: settings_page
+      bg_color: 0x000000
+
+      widgets:
+        # ---------- BRIGHTNESS GROUP ----------
+        - obj:
+            id: brightness_group
+            align: TOP_MID
+            y: 0
+            width: 440
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              flex_align_main: CENTER
+              flex_align_cross: STRETCH
+              pad_row: 8
+            widgets:
+              # Header: "Brightness  100%" – text and percent on one line
+              - obj:
+                  id: brightness_header
+                  width: 400
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  bg_color: 0x000000
+                  border_color: 0x000000
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 10      # Space between "Brightness" and "100%"
+                  widgets:
+                    - label:
+                        id: brightness_label
+                        text: "Brightness"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+                    - label:
+                        id: brightness_value_label
+                        text: "100%"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+              # Slider controlling backlight brightness directly
+              - slider:
+                  id: brightness_slider
+                  width: 400
+                  height: 20
+                  min_value: 5        # Avoid too low brightness
+                  max_value: 100
+                  value: 100
+                  bg_color: 0x404040
+                  border_width: 0     # No frame around slider
+                  radius: 4
+                  indicator:
+                    bg_color: 0xFFFFFF
+                  knob:
+                    bg_color: 0xFFFFFF
+                  on_change:
+                    then:
+                      - script.execute: settings_idle_timer   
+                      # Apply brightness immediately to backlight
+                      - lambda: |-
+                          // x is in range [5 .. 100]
+                          float v = x / 100.0f;
+                          if (v < 0.02f) {
+                            v = 0.02f;  // Avoid fully turning off backlight
+                          }
+                          auto call = id(back_light).turn_on();
+                          call.set_brightness(v);
+                          call.perform();
+                      # Update percentage label
+                      - lvgl.label.update:
+                          id: brightness_value_label
+                          text:
+                            format: "%.0f%%"
+                            args: [ x ]
+                            if_nan: "??%"
+
+        # ---------- COLOR GROUP (R/G/B sliders + preview) ----------
+        - obj:
+            id: color_group
+            align: TOP_MID
+            y: 110
+            width: 480
+            height: SIZE_CONTENT
+            bg_color: 0x000000
+            border_color: 0x000000
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              flex_align_main: CENTER
+              flex_align_cross: STRETCH
+              pad_row: 2
+            widgets:
+              # Header + preview
+              - obj:
+                  id: color_header
+                  width: 440
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  bg_color: 0x000000
+                  border_color: 0x000000
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                    pad_column: 20
+                  widgets:
+                    - label:
+                        id: color_label
+                        text: "Text color:"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+                    # New label with HEX value between text and preview
+                    - label:
+                        id: color_hex_label
+                        text: "#FFFFFF"        # initial value, will be updated from script
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+                    - obj:
+                        id: color_preview
+                        width: 60
+                        height: 30
+                        bg_color: 0xFFFFFF
+                        border_color: 0xFFFFFF
+                        border_width: 2
+                        radius: 4
+
+              # R
+              - obj:
+                  id: color_r_group
+                  width: 440
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  bg_color: 0x000000
+                  border_color: 0x000000
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 20
+                  widgets:
+                    - label:
+                        id: color_r_label
+                        text: "R"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+                    - slider:
+                        id: color_r_slider
+                        width: 280
+                        height: 18
+                        min_value: 0
+                        max_value: 255
+                        value: 255
+                        bg_color: 0x404040
+                        radius: 4
+                        indicator:
+                          bg_color: 0xFF0000
+                        knob:
+                          bg_color: 0xFF0000
+                        on_change:
+                          then:
+                            - script.execute: settings_idle_timer   
+                            - lambda: |-
+                                // Update global R channel
+                                id(text_color_r_glob) = (int) x;
+                            - script.execute: apply_text_color
+                            - script.execute: update_color_ui
+                            - text.set:
+                                id: text_color_hex
+                                value: !lambda |-
+                                  int r = id(text_color_r_glob);
+                                  int g = id(text_color_g_glob);
+                                  int b = id(text_color_b_glob);
+                                  if (r < 0) r = 0; if (r > 255) r = 255;
+                                  if (g < 0) g = 0; if (g > 255) g = 255;
+                                  if (b < 0) b = 0; if (b > 255) b = 255;
+                                  char buf[8];
+                                  sprintf(buf, "%02X%02X%02X", r, g, b);
+                                  return std::string(buf);
+
+                    - label:
+                        id: color_r_value_label
+                        text: "255"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+              # G
+              - obj:
+                  id: color_g_group
+                  width: 440
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  bg_color: 0x000000
+                  border_color: 0x000000
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 20
+                  widgets:
+                    - label:
+                        id: color_g_label
+                        text: "G"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+                    - slider:
+                        id: color_g_slider
+                        width: 280
+                        height: 18
+                        min_value: 0
+                        max_value: 255
+                        value: 255
+                        bg_color: 0x404040
+                        radius: 4
+                        indicator:
+                          bg_color: 0x00FF00
+                        knob:
+                          bg_color: 0x00FF00
+                        on_change:
+                          then:
+                            - script.execute: settings_idle_timer   
+                            - lambda: |-
+                                // Update global G channel
+                                id(text_color_g_glob) = (int) x;
+                            - script.execute: apply_text_color
+                            - script.execute: update_color_ui
+                            - text.set:
+                                id: text_color_hex
+                                value: !lambda |-
+                                  int r = id(text_color_r_glob);
+                                  int g = id(text_color_g_glob);
+                                  int b = id(text_color_b_glob);
+                                  if (r < 0) r = 0; if (r > 255) r = 255;
+                                  if (g < 0) g = 0; if (g > 255) g = 255;
+                                  if (b < 0) b = 0; if (b > 255) b = 255;
+                                  char buf[8];
+                                  sprintf(buf, "%02X%02X%02X", r, g, b);
+                                  return std::string(buf);
+
+                    - label:
+                        id: color_g_value_label
+                        text: "255"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+              # B
+              - obj:
+                  id: color_b_group
+                  width: 440
+                  height: SIZE_CONTENT
+                  bg_opa: TRANSP
+                  bg_color: 0x000000
+                  border_color: 0x000000
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 20
+                  widgets:
+                    - label:
+                        id: color_b_label
+                        text: "B"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+                    - slider:
+                        id: color_b_slider
+                        width: 280
+                        height: 18
+                        min_value: 0
+                        max_value: 255
+                        value: 255
+                        bg_color: 0x404040
+                        radius: 4
+                        indicator:
+                          bg_color: 0x0000FF
+                        knob:
+                          bg_color: 0x0000FF
+                        on_change:
+                          then:
+                            - script.execute: settings_idle_timer   
+                            - lambda: |-
+                                // Update global B channel
+                                id(text_color_b_glob) = (int) x;
+                            - script.execute: apply_text_color
+                            - script.execute: update_color_ui
+                            - text.set:
+                                id: text_color_hex
+                                value: !lambda |-
+                                  int r = id(text_color_r_glob);
+                                  int g = id(text_color_g_glob);
+                                  int b = id(text_color_b_glob);
+                                  if (r < 0) r = 0; if (r > 255) r = 255;
+                                  if (g < 0) g = 0; if (g > 255) g = 255;
+                                  if (b < 0) b = 0; if (b > 255) b = 255;
+                                  char buf[8];
+                                  sprintf(buf, "%02X%02X%02X", r, g, b);
+                                  return std::string(buf);
+
+                    - label:
+                        id: color_b_value_label
+                        text: "255"
+                        text_font: montserrat_27
+                        text_color: 0xFFFFFF
+
+        # ---------- HOME ASSISTANT ICON (switch back to main page) ----------
+        - image:
+            id: ha_icon_widget_settings
+            src: icon_home_assistant
+            align: BOTTOM_MID
+            y: -20
+            image_recolor: 0xFFFFFF
+            image_recolor_opa: COVER
+            on_click:
+              then:
+                - script.stop: settings_idle_timer         # stop timer
+                - lvgl.page.show:
+                    id: main_page
+                    animation: MOVE_RIGHT
+                    time: 200ms
