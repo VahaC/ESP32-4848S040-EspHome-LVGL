@@ -46,11 +46,11 @@ web_server:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "4J1r6bO1mVt0R9CjLw8y3dTfX2q5sZu7pNhgQWE2L8M="
+    key: !secret esphome-esp32-s3-4848s040_encryption_key
 
 ota:
   - platform: esphome
-    password: "deadbeefdeadbeefdeadbeefdeadbeef"
+    password: !secret esphome-esp32-s3-4848s040_ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -196,6 +196,37 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  # Swipe detection
+  - id: swipe_start_x
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: swipe_start_y
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: swipe_in_progress
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: swipe_last_x
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: swipe_last_y
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: swipe_locked
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
 # -------------------- OUTPUTS --------------------
 # Backlight PWM
 output:
@@ -298,13 +329,99 @@ touchscreen:
   - platform: gt911
     id: tft_touch
     display: tft_display
+
+    # Called when a new touch appears (gesture start)
     on_touch:
       then:
+        # If we are already on the settings page – just reset the idle timer
         - if:
             condition:
               lambda: 'return id(is_settings_page_active);'
             then:
               - script.execute: settings_idle_timer
+
+        # Remember swipe start point
+        - lambda: |-
+            if (id(swipe_locked)) {
+              // Swipe handling is locked (user is interacting with a slider)
+              ESP_LOGI("swipe", "on_touch: swipe_locked, ignoring swipe start");
+              id(swipe_in_progress) = false;
+              return;
+            }
+
+            auto t = id(tft_touch).get_touch();
+            if (!t.has_value()) {
+              ESP_LOGI("swipe", "on_touch without coordinates");
+              return;
+            }
+            auto p = t.value();
+            id(swipe_start_x) = p.x;
+            id(swipe_start_y) = p.y;
+            id(swipe_in_progress) = true;
+            ESP_LOGI("swipe", "start at (%d,%d)", p.x, p.y);
+
+    # Called periodically while the screen is being touched
+    on_update:
+      then:
+        - lambda: |-
+            const int SWIPE_THRESHOLD = 80;  // minimum movement along X in pixels
+
+            // Do not process swipe while it is locked (slider is being dragged)
+            if (id(swipe_locked)) {
+              return;
+            }
+
+            if (!id(swipe_in_progress)) {
+              return;
+            }
+
+            auto t = id(tft_touch).get_touch();
+            if (!t.has_value()) {
+              // Finger was probably lifted
+              ESP_LOGI("swipe", "update: no touch -> cancel");
+              id(swipe_in_progress) = false;
+              return;
+            }
+
+            auto p = t.value();
+            int cx = p.x;
+            int cy = p.y;
+
+            int dx = cx - id(swipe_start_x);
+            int dy = cy - id(swipe_start_y);
+            int adx = dx >= 0 ? dx : -dx;
+            int ady = dy >= 0 ? dy : -dy;
+
+            ESP_LOGI("swipe", "update at (%d,%d), dx=%d dy=%d", cx, cy, dx, dy);
+
+            // Horizontal gesture only
+            if (adx > ady && adx > SWIPE_THRESHOLD) {
+              if (dx > 0) {
+                ESP_LOGI("swipe", "DETECTED RIGHT SWIPE");
+                // Right swipe -> go back to main page if we are on the settings page
+                if (id(is_settings_page_active)) {
+                  id(show_main_page).execute();
+                }
+              } else {
+                ESP_LOGI("swipe", "DETECTED LEFT SWIPE");
+                // Left swipe -> open settings page if we are on the main page
+                if (!id(is_settings_page_active)) {
+                  id(show_settings_page).execute();
+                }
+              }
+
+              // Prevent multiple triggers for the same gesture
+              id(swipe_in_progress) = false;
+            }
+
+    # Called when the finger is released
+    on_release:
+      then:
+        - lambda: |-
+            ESP_LOGI("swipe", "release -> cancel");
+            // End current swipe and re-enable swipe detection for next gesture
+            id(swipe_in_progress) = false;
+            id(swipe_locked) = false;
 
 # -------------------- IMAGES --------------------
 image:
@@ -444,6 +561,37 @@ script:
           time: 200ms
       - lambda: 'id(is_settings_page_active) = false;'
 
+  # Go to settings page (from icon or swipe right)
+  - id: show_settings_page
+    mode: single
+    then:
+      - lambda: 'id(is_settings_page_active) = true;'
+      - script.execute: settings_idle_timer
+      - lvgl.page.show:
+          id: settings_page
+          animation: MOVE_LEFT
+          time: 200ms
+      - lambda: |-
+          // Always reset scroll position to the top when opening the settings page
+          lv_obj_t *page = id(settings_page)->obj;  // get LVGL object from page wrapper
+          if (page != nullptr) {
+            ESP_LOGI("settings_page", "Reset scroll to top for settings_page (page obj=%p)", page);
+            lv_obj_scroll_to_y(page, 0, LV_ANIM_OFF);
+            lv_obj_scroll_to_x(page, 0, LV_ANIM_OFF);
+          } else {
+            ESP_LOGW("settings_page", "id(settings_page)->obj is null, cannot reset scroll");
+          }
+
+  # Go back to main page (from Back button or swipe left)
+  - id: show_main_page
+    mode: single
+    then:
+      - script.stop: settings_idle_timer
+      - lambda: 'id(is_settings_page_active) = false;'
+      - lvgl.page.show:
+          id: main_page
+          animation: MOVE_RIGHT
+          time: 200ms
 
   # Apply current global text color (R/G/B) to all LVGL widgets
   - id: apply_text_color
@@ -848,13 +996,7 @@ lvgl:
             image_recolor_opa: COVER
             on_click:
               then:
-                - lambda: 'id(is_settings_page_active) = true;'
-                - script.execute: settings_idle_timer      # start/reset timer
-                - lvgl.page.show:
-                    id: settings_page
-                    animation: MOVE_LEFT
-                    time: 200ms
-
+                - script.execute: show_settings_page
 
     # ================= SETTINGS PAGE =================
     - id: settings_page
@@ -908,7 +1050,7 @@ lvgl:
                   id: brightness_slider
                   width: 400
                   height: 20
-                  min_value: 5        # Avoid too low brightness
+                  min_value: 15        # Avoid too low brightness
                   max_value: 100
                   value: 100
                   bg_color: 0x404040
@@ -920,6 +1062,10 @@ lvgl:
                     bg_color: 0xFFFFFF
                   on_change:
                     then:
+                      - lambda: |-
+                          // Disable swipe detection while brightness slider is being dragged
+                          id(swipe_locked) = true;
+                          id(swipe_in_progress) = false;
                       - script.execute: settings_idle_timer   
                       # Apply brightness immediately to backlight
                       - lambda: |-
@@ -1028,6 +1174,10 @@ lvgl:
                           bg_color: 0xFF0000
                         on_change:
                           then:
+                            - lambda: |-
+                                // Disable swipe detection while brightness slider is being dragged
+                                id(swipe_locked) = true;
+                                id(swipe_in_progress) = false;
                             - script.execute: settings_idle_timer   
                             - lambda: |-
                                 // Update global R channel
@@ -1089,6 +1239,10 @@ lvgl:
                           bg_color: 0x00FF00
                         on_change:
                           then:
+                            - lambda: |-
+                                // Disable swipe detection while brightness slider is being dragged
+                                id(swipe_locked) = true;
+                                id(swipe_in_progress) = false;
                             - script.execute: settings_idle_timer   
                             - lambda: |-
                                 // Update global G channel
@@ -1150,6 +1304,10 @@ lvgl:
                           bg_color: 0x0000FF
                         on_change:
                           then:
+                            - lambda: |-
+                                // Disable swipe detection while brightness slider is being dragged
+                                id(swipe_locked) = true;
+                                id(swipe_in_progress) = false;
                             - script.execute: settings_idle_timer   
                             - lambda: |-
                                 // Update global B channel
@@ -1426,12 +1584,7 @@ lvgl:
               flex_align_cross: CENTER
             on_click:
               then:
-                - script.stop: settings_idle_timer         # stop timer
-                - lambda: 'id(is_settings_page_active) = false;'
-                - lvgl.page.show:
-                    id: main_page
-                    animation: MOVE_RIGHT
-                    time: 200ms
+                - script.execute: show_main_page
             widgets:
               - label:
                   id: back_label

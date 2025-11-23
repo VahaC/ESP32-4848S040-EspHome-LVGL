@@ -5,7 +5,7 @@ An ESPHome configuration for the ESP32-S3 + 4.8" 480×480 ST7701S (4848S040) mod
 ## Overview
 - Targets `esp32s3` + ESP-IDF with octal PSRAM at 80 MHz for the ST7701S RGB panel.
 - Boots into a high-contrast dashboard showing temperature, humidity, pressure, and battery level.
-- A settings page lets you fine-tune the backlight brightness (PWM via LEDC) and text color (RGB sliders + HEX input).
+- Settings page exposes backlight, text-color, and icon-color pickers (RGB sliders + HEX fields) plus a Back button; swipe gestures offer the same navigation.
 - Integrates natively with Home Assistant by streaming sensor states through the encrypted ESPHome API.
 - Includes OTA upgrades, a fallback AP, a web server, and verbose debug logging for field diagnostics.
 
@@ -13,9 +13,10 @@ An ESPHome configuration for the ESP32-S3 + 4.8" 480×480 ST7701S (4848S040) mod
 - **Display pipeline**: ST7701S RGB (480×480), MODE3 SPI at 2 MHz for commands, PCLK 12 MHz for pixel data, custom porch/pulse timings, and LVGL double buffering (25% of RAM).
 - **Touch**: GT911 I²C touchscreen tied to the same LVGL instance for smooth page navigation.
 - **Backlight control**: LEDC PWM on GPIO38 exposed as a standard ESPHome light; brightness is synchronized with an LVGL slider and a template sensor (`Current Brightness`).
-- **Dynamic theming**: Three global ints keep the active text color; scripts `apply_text_color` and `update_color_ui` repaint every label, bar, and slider knob whenever RGB sliders or the HEX text sensor change.
+- **Dynamic theming**: Separate global RGB triplets drive text and icon colors. Scripts `apply_text_color` / `update_color_ui` and `apply_icon_color` / `update_icon_color_ui` repaint labels, bars, sliders, icons, and preview tiles after any slider or HEX change.
 - **Home Assistant data**: Sensors for temperature, humidity, pressure, and battery read HA entities and immediately update LVGL widgets via `lvgl.label.update` / `lvgl.bar.update` actions.
-- **UX niceties**: 30-second idle timer auto-returns from settings to the main page; Home Assistant icon acts as the navigation button in both directions.
+- **UX niceties**: 30-second idle timer auto-returns from settings to the main page; Home Assistant icon (tap) and horizontal swipe detection both toggle between pages.
+- **Gesture navigation**: GT911 `on_touch`/`on_update` handlers detect left/right swipes (80‑pixel threshold) to flip pages, logging gesture state for debugging.
 
 ## Hardware Checklist
 - ESP32-S3 dev board with PSRAM (WT32-S3 or similar) and reliable 5 V power.
@@ -43,11 +44,17 @@ Pick whichever Home Assistant sensors you want to display and mirror their entit
 - `sensor.outdoor_pressure_mmhg`
 - `sensor.outdoor_sensor_battery`
 
-There is also a text sensor (`text_color_hex`) that accepts HEX color strings from Home Assistant, and a template sensor (`Current Brightness`) that publishes actual backlight brightness so Lovelace sliders stay in sync.
+There are two text sensors (`text_color_hex` and `icon_color_hex`) that accept HEX color strings from Home Assistant, a template sensor (`Current Brightness`) that publishes actual backlight brightness so Lovelace sliders stay in sync, and a `text_sensor.debug` block exposing device/reset info.
+
+### Exposed sensors and helpers
+- `sensor.temperature`, `sensor.humidity`, `sensor.presure`, `sensor.battery` (Home Assistant mirrors)
+- `sensor.current_brightness_variable` (ESPHome template)
+- `text_sensor.device_info`, `text_sensor.reset_reason` (ESPHome debug)
+- `text.text_color_hex`, `text.icon_color_hex` (two-way HEX channels)
 
 ## Networking and Secrets
 - Add `wifi_ssid` and `wifi_password` to `secrets.yaml` (same folder as the YAML file).
-- Customize `api.encryption.key` and `ota.password` if you want unique credentials.
+- Provide `esphome-esp32-s3-4848s040_encryption_key` and `esphome-esp32-s3-4848s040_ota_password` entries in the same `secrets.yaml`; change the values whenever you regenerate credentials.
 - Fallback AP SSID/password are `Esphome-Esp32-S3-4848S040` / `AWwK5mCFhfZC` if Wi-Fi fails.
 
 ## Build & Flash
@@ -65,8 +72,19 @@ There is also a text sensor (`text_color_hex`) that accepts HEX color strings fr
 	- Home Assistant logo at the bottom jumps to the settings page.
 - **Settings page**
 	- Backlight slider (5–100 %) backed by the same light entity, ensuring the hardware slider and Home Assistant stay aligned.
-	- RGB sliders, decimal labels, HEX preview, and a color swatch, all updated through the `update_color_ui` script.
-	- Touching any control restarts the idle timer; after 30 s of inactivity the UI returns to the main page with a slide animation.
+	- Two groups of RGB sliders, decimal labels, HEX preview, and color swatches—one for text, one for icons—kept in sync by `update_color_ui` and `update_icon_color_ui`.
+	- Touching any control restarts the idle timer; after 30 s of inactivity the UI returns to the main page with a slide animation or you can swipe right / tap Back.
+
+## Touch & Navigation Logic
+- `on_touch` records initial coordinates, restarts the idle timer if already on the settings page, and arms swipe tracking.
+- `on_update` compares deltas to an 80‑pixel threshold to decide left/right navigation (settings ↔ main) and logs each step for troubleshooting.
+- `on_release` cancels pending swipes, preventing ghost gestures.
+
+## Automation Scripts
+- `settings_idle_timer`: returns to the main page after 30 s of inactivity.
+- `show_settings_page` / `show_main_page`: encapsulate navigation, including scroll reset when entering settings.
+- `apply_text_color` + `update_color_ui`: propagate text RGB sliders/HEX input across labels, bars, sliders, and preview tiles.
+- `apply_icon_color` + `update_icon_color_ui`: recolor every icon and keep icon sliders/labels synchronized.
 
 ## Customization Ideas
 - Replace Google Fonts (`gfonts://Montserrat`) with any supported Google Font or local TTF file.
