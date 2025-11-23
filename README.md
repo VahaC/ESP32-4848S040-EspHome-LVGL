@@ -98,5 +98,7 @@ There are two text sensors (`text_color_hex` and `icon_color_hex`) that accept H
 - The `debug` component publishes reset reasons and useful runtime info as text sensors.
 - If flickering occurs, lower `ledc` PWM frequency or re-check the RGB pin wiring for the ST7701S bus.
 
+[More deetails](https://www.vahac.com/building-a-touch-controlled-home-assistant-dashboard-on-an-esp32-s3-with-lvgl-esphome/)
+
 ## License
 See `LICENSE` for distribution terms.
